@@ -40,3 +40,6 @@ export function evaluate(pack, p) {
 }
 
 export const present = (pack, p) => ({ text: plateText(p), region: p.region, ...evaluate(pack, p) });
+
+// Ключи для коллекций: какие «записи» открывает этот номер (регион и сработавшие правила).
+export const plateKeys = (pack, p) => ['region:' + p.region, ...evaluate(pack, p).hits.map(h => 'rule:' + h.name)];

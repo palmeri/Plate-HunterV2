@@ -3,7 +3,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generate, evaluate, present } from './engine.js';
+import { generate, evaluate, present, plateKeys } from './engine.js';
+import { TASKS, pickTasks } from './tasks.js';
 import { verifyInitData } from './verify.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +30,28 @@ function save() {
   fs.writeFileSync(DATA_FILE + '.tmp', JSON.stringify(db));
   fs.renameSync(DATA_FILE + '.tmp', DATA_FILE);
 }
-const player = id => (db.players[id] ??= { coins: CFG.startCoins, pending: null, garage: [], nextId: 1 });
+const today = () => new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10); // дата по Москве
+function player(id) {
+  const p = (db.players[id] ??= { coins: CFG.startCoins, pending: null, garage: [], nextId: 1 });
+  p.found ??= {}; p.done ??= {};
+  if (!p.daily || p.daily.date !== today())   // новый день: бесплатная крутка и новые задания
+    p.daily = { date: today(), free: true, tasks: pickTasks(3).map(id => ({ id, progress: 0, claimed: false })) };
+  return p;
+}
+function track(p, e) {
+  for (const t of p.daily.tasks) { const d = TASKS[t.id]; t.progress = Math.min(d.target, t.progress + d.on(e)); }
+}
+function collect(p, plate) {                  // номер попал в гараж: открываем записи коллекций
+  const pack = packs[plate.pack], notes = [];
+  for (const k of plateKeys(pack, plate)) p.found[pack.id + '|' + k] = true;
+  for (const c of pack.collections || []) {
+    const id = pack.id + '|' + c.id;
+    if (!p.done[id] && c.entries.every(e => p.found[pack.id + '|' + e.key])) {
+      p.done[id] = true; p.coins += c.reward; notes.push(`Коллекция «${c.name}» собрана: +${c.reward}`);
+    }
+  }
+  return notes.join(' ');
+}
 
 const send = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
 const fail = (res, code, error) => send(res, code, { error });
@@ -45,7 +67,13 @@ const readBody = req => new Promise(r => {
   req.on('end', () => { try { r(JSON.parse(s || '{}')); } catch { r({}); } });
 });
 
-const view = p => ({
+const view = (p, notice) => ({
+  notice: notice || undefined,
+  daily: { free: p.daily.free, tasks: p.daily.tasks.map(t => ({ id: t.id, text: TASKS[t.id].text, target: TASKS[t.id].target, reward: TASKS[t.id].reward, progress: t.progress, claimed: t.claimed })) },
+  collections: (packs[ACTIVE_PACK].collections || []).map(c => ({
+    id: c.id, name: c.name, reward: c.reward, done: !!p.done[ACTIVE_PACK + '|' + c.id],
+    entries: c.entries.map(e => ({ key: e.key, label: e.label, found: !!p.found[ACTIVE_PACK + '|' + e.key] }))
+  })),
   coins: p.coins,
   pending: p.pending && present(packs[p.pending.pack], p.pending),
   garage: p.garage.map(g => ({ id: g.id, ...present(packs[g.plate.pack], g.plate) })),
@@ -73,27 +101,41 @@ const server = http.createServer(async (req, res) => {
 
   if (route === 'POST /api/spin') {
     if (p.pending) return fail(res, 409, 'resolve_pending');
-    if (p.coins < CFG.spinCost) return fail(res, 402, 'no_coins');
-    p.coins -= CFG.spinCost;
+    const cost = p.daily.free ? 0 : CFG.spinCost;
+    if (p.coins < cost) return fail(res, 402, 'no_coins');
+    p.coins -= cost; p.daily.free = false;
     p.pending = generate(packs[ACTIVE_PACK]);
+    track(p, { type: 'spin', rank: evaluate(packs[ACTIVE_PACK], p.pending).rank });
     save(); return send(res, 200, view(p));
   }
   if (route === 'POST /api/sell') {
     if (!p.pending) return fail(res, 409, 'nothing_pending');
-    p.coins += evaluate(packs[p.pending.pack], p.pending).price; p.pending = null;
+    const price = evaluate(packs[p.pending.pack], p.pending).price;
+    p.coins += price; p.pending = null; track(p, { type: 'sell', amount: price });
     save(); return send(res, 200, view(p));
   }
   if (route === 'POST /api/keep') {
     if (!p.pending) return fail(res, 409, 'nothing_pending');
     if (p.garage.length >= CFG.garageSize) return fail(res, 409, 'garage_full');
-    p.garage.push({ id: p.nextId++, plate: p.pending }); p.pending = null;
-    save(); return send(res, 200, view(p));
+    const plate = p.pending;
+    p.garage.push({ id: p.nextId++, plate }); p.pending = null; track(p, { type: 'keep' });
+    const notice = collect(p, plate);
+    save(); return send(res, 200, view(p, notice));
   }
   if (route === 'POST /api/sell-garage') {
     const { id } = await readBody(req);
     const i = p.garage.findIndex(g => g.id === id);
     if (i < 0) return fail(res, 404, 'not_found');
-    p.coins += evaluate(packs[p.garage[i].plate.pack], p.garage[i].plate).price; p.garage.splice(i, 1);
+    const price = evaluate(packs[p.garage[i].plate.pack], p.garage[i].plate).price;
+    p.coins += price; p.garage.splice(i, 1); track(p, { type: 'sell', amount: price });
+    save(); return send(res, 200, view(p));
+  }
+  if (route === 'POST /api/claim-task') {
+    const { id } = await readBody(req);
+    const t = p.daily.tasks.find(t => t.id === id);
+    if (!t) return fail(res, 404, 'not_found');
+    if (t.claimed || t.progress < TASKS[id].target) return fail(res, 409, 'not_ready');
+    t.claimed = true; p.coins += TASKS[id].reward;
     save(); return send(res, 200, view(p));
   }
   fail(res, 404, 'not_found');

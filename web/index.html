@@ -27,6 +27,11 @@ h2{font-size:15px;margin:22px 0 8px;display:flex;justify-content:space-between;c
 .garage li{display:flex;align-items:center;gap:10px;background:var(--bg2);border-left:5px solid var(--t0);padding:8px 10px;border-radius:8px}
 .garage .num{flex:1;font-weight:800;font-size:18px;letter-spacing:1px}.garage small{display:block;font-weight:500;font-size:12px;color:var(--muted);letter-spacing:0}
 .garage button{padding:8px 12px;font-size:13px}.empty-msg{color:var(--muted);font-size:14px}
+.list{list-style:none;padding:0;display:grid;gap:8px}
+.list li{display:flex;align-items:center;gap:10px;background:var(--bg2);padding:8px 10px;border-radius:8px}
+.list .tx{flex:1;font-size:14px}.list .tx small{display:block;color:var(--muted)}.list button{padding:8px 12px;font-size:13px}
+details{background:var(--bg2);border-radius:8px;margin-bottom:8px;padding:8px 10px}summary{cursor:pointer;font-weight:600;font-size:14px}
+.ent{font-size:13px;color:var(--muted);margin-top:6px}.ent.ok{color:var(--text)}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--ink);padding:10px 16px;border-radius:10px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s}.toast.on{opacity:1}
 </style>
 </head>
@@ -41,6 +46,10 @@ h2{font-size:15px;margin:22px 0 8px;display:flex;justify-content:space-between;c
   <button class="alt" id="sell" disabled>Продать</button>
   <button class="alt" id="keep" disabled>В гараж</button>
 </div>
+<h2><span>Задания дня</span><span id="dayinfo"></span></h2>
+<ul class="list" id="tasks"></ul>
+<h2><span>Коллекции</span><span>пополняются при сохранении в гараж</span></h2>
+<div id="cols"></div>
 <h2><span>Гараж</span><span id="cap"></span></h2>
 <ul class="garage" id="garage"></ul>
 <div class="toast" id="toast"></div>
@@ -49,14 +58,14 @@ h2{font-size:15px;margin:22px 0 8px;display:flex;justify-content:space-between;c
 const tg=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData?Telegram.WebApp:null;
 if(tg){try{tg.ready();tg.expand();tg.setHeaderColor("#1b1e22");tg.setBackgroundColor("#1b1e22")}catch(e){}}
 const AUTH=tg?"tma "+tg.initData:"dev 1"; // "dev" работает только если на сервере DEV_MODE=1
-const ERR={no_coins:"Не хватает монет",resolve_pending:"Сначала продайте или сохраните номер",garage_full:"Гараж заполнен",unauthorized:"Откройте игру через Telegram"};
+const ERR={no_coins:"Не хватает монет",resolve_pending:"Сначала продайте или сохраните номер",garage_full:"Гараж заполнен",unauthorized:"Откройте игру через Telegram",not_ready:"Задание ещё не выполнено"};
 const $=id=>document.getElementById(id);let S=null,busy=false;
 const toast=t=>{const e=$("toast");e.textContent=t;e.classList.add("on");clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove("on"),1800)};
 async function api(path,method,body){
   const r=await fetch(path,{method:method||"GET",headers:{"Content-Type":"application/json",Authorization:AUTH},body:body?JSON.stringify(body):undefined});
   const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||("http_"+r.status));return j}
 async function act(path,body){if(busy)return;busy=true;
-  try{const prev=S&&S.coins;S=await api(path,"POST",body);if(path==="/api/sell"||path==="/api/sell-garage")toast("+"+(S.coins-prev));
+  try{const prev=S&&S.coins;S=await api(path,"POST",body);if(S.notice)toast(S.notice);else if(path!=="/api/spin"&&path!=="/api/keep"&&S.coins>prev)toast("+"+(S.coins-prev));
     try{tg&&tg.HapticFeedback.notificationOccurred(path==="/api/spin"&&S.pending&&S.pending.rank>=2?"success":"warning")}catch(e){}}
   catch(e){toast(ERR[e.message]||"Ошибка связи")}busy=false;render()}
 function showPlate(p){const pl=$("plate");pl.classList.toggle("empty",!p);if(!p)return;
@@ -65,7 +74,7 @@ function showPlate(p){const pl=$("plate");pl.classList.toggle("empty",!p);if(!p)
   $("hits").textContent=p.hits.length?p.hits.map(h=>h.name+" +"+h.pts).join(", "):"Комбинаций нет";$("price").textContent="Цена продажи: "+p.price}
 function render(){if(!S)return;const c=S.config,pend=S.pending;
   $("coins").textContent=S.coins;$("cap").textContent=S.garage.length+" / "+c.garageSize;
-  $("spin").textContent="Крутить за "+c.spinCost;$("spin").disabled=!!pend||S.coins<c.spinCost;
+  const dl=S.daily;$("spin").textContent=dl.free?"Крутить бесплатно (раз в день)":"Крутить за "+c.spinCost;$("spin").disabled=!!pend||(!dl.free&&S.coins<c.spinCost);
   $("sell").disabled=!pend;$("keep").disabled=!pend||S.garage.length>=c.garageSize;
   if(pend)showPlate(pend);
   const g=$("garage");g.textContent="";
@@ -74,7 +83,16 @@ function render(){if(!S)return;const c=S.config,pend=S.pending;
     const n=document.createElement("div");n.className="num";n.textContent=it.text+" "+it.region;
     const sm=document.createElement("small");sm.textContent=it.tier+", "+it.total+" очк.";n.appendChild(sm);
     const b=document.createElement("button");b.className="alt";b.textContent="Продать за "+it.price;b.onclick=()=>act("/api/sell-garage",{id:it.id});
-    li.append(n,b);g.appendChild(li)})}
+    li.append(n,b);g.appendChild(li)});
+  $("dayinfo").textContent=dl.free?"бесплатная крутка доступна":"";
+  const tl=$("tasks");tl.textContent="";
+  dl.tasks.forEach(t=>{const li=document.createElement("li"),tx=document.createElement("div"),sm=document.createElement("small"),b=document.createElement("button");
+    const ready=t.progress>=t.target&&!t.claimed;tx.className="tx";tx.textContent=t.text;sm.textContent=t.progress+" / "+t.target+" · награда "+t.reward;tx.appendChild(sm);
+    b.className=ready?"":"alt";b.disabled=!ready;b.textContent=t.claimed?"Получено":"Забрать";b.onclick=()=>act("/api/claim-task",{id:t.id});li.append(tx,b);tl.appendChild(li)});
+  const cw=$("cols"),open=new Set([...cw.querySelectorAll("details[open]")].map(d=>d.dataset.id));cw.textContent="";
+  S.collections.forEach(c=>{const d=document.createElement("details"),sm=document.createElement("summary");d.dataset.id=c.id;if(open.has(c.id))d.open=true;
+    sm.textContent=c.name+" — "+c.entries.filter(e=>e.found).length+" / "+c.entries.length+(c.done?" ✓":" · награда "+c.reward);d.appendChild(sm);
+    c.entries.forEach(e=>{const x=document.createElement("div");x.className="ent"+(e.found?" ok":"");x.textContent=(e.found?"✓ ":"○ ")+e.label;d.appendChild(x)});cw.appendChild(d)})}
 $("spin").onclick=()=>act("/api/spin");$("sell").onclick=()=>act("/api/sell");$("keep").onclick=()=>act("/api/keep");
 const u=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user;$("hello").textContent=u?"Привет, "+u.first_name:"Тестовый режим (вне Telegram)";
 api("/api/state").then(s=>{S=s;render()}).catch(e=>toast(ERR[e.message]||"Не удалось связаться с сервером"));
