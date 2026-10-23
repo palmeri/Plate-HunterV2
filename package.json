@@ -1,0 +1,8 @@
+{
+  "name": "plate-hunter",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server/server.js", "simulate": "node tools/simulate.js ru 1000000", "test": "node tools/test.js" }
+}

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Plate Hunter</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#1b1e22;--bg2:#262a30;--line:#3a3f47;--paint:#f2b134;--plate:#f5f3ec;--ink:#13171b;--muted:#9aa1ab;--text:#eceff3;
+--t0:#8d949e;--t1:#4fb477;--t2:#4b8fe0;--t3:#a36be0;--t4:#f2b134}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;padding:env(safe-area-inset-top,0) 16px env(safe-area-inset-bottom,0);max-width:480px;margin:0 auto}
+header{display:flex;justify-content:space-between;align-items:baseline;padding:16px 0 8px}
+h1{font-size:18px}.coins{font-size:22px;font-weight:800;color:var(--paint)}.hello{color:var(--muted);font-size:13px}
+.stage{margin:18px 0 12px;text-align:center}
+.plate{display:inline-flex;background:var(--plate);color:var(--ink);border:3px solid var(--ink);border-radius:10px;overflow:hidden;box-shadow:0 0 0 3px var(--plate),0 0 0 4px var(--line);min-width:290px;max-width:100%;font-family:"Arial Narrow","Helvetica Neue",Arial,sans-serif;font-weight:800}
+.plate .main{flex:1;padding:10px 14px;font-size:44px;letter-spacing:3px;line-height:1.1;white-space:nowrap}
+.plate .reg{border-left:3px solid var(--ink);padding:6px 12px;display:flex;flex-direction:column;justify-content:center;min-width:74px}
+.plate .reg b{font-size:30px;line-height:1}.plate .reg i{font-style:normal;font-size:11px;letter-spacing:1px}
+.plate.empty{opacity:.35}.verdict{margin-top:14px;min-height:62px}
+.tier{font-weight:700}.hits,.price{color:var(--muted);font-size:14px;margin-top:2px}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}
+button{font:inherit;font-weight:700;border:0;border-radius:12px;padding:14px;cursor:pointer;color:var(--ink);background:var(--paint)}
+button.alt{background:var(--bg2);color:var(--text);border:1px solid var(--line)}button.full{grid-column:1/-1}button:disabled{opacity:.35;cursor:default}
+h2{font-size:15px;margin:22px 0 8px;display:flex;justify-content:space-between;color:var(--muted)}
+.garage{list-style:none;padding:0;display:grid;gap:8px}
+.garage li{display:flex;align-items:center;gap:10px;background:var(--bg2);border-left:5px solid var(--t0);padding:8px 10px;border-radius:8px}
+.garage .num{flex:1;font-weight:800;font-size:18px;letter-spacing:1px}.garage small{display:block;font-weight:500;font-size:12px;color:var(--muted);letter-spacing:0}
+.garage button{padding:8px 12px;font-size:13px}.empty-msg{color:var(--muted);font-size:14px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--text);color:var(--ink);padding:10px 16px;border-radius:10px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s}.toast.on{opacity:1}
+</style>
+</head>
+<body>
+<header><div><h1>Plate Hunter</h1><div class="hello" id="hello"></div></div><div class="coins" id="coins">0</div></header>
+<section class="stage">
+  <div class="plate empty" id="plate"><div class="main" id="main">А000АА</div><div class="reg"><b id="reg">00</b><i>RUS</i></div></div>
+  <div class="verdict" aria-live="polite"><div class="tier" id="tier">Нажмите «Крутить»</div><div class="hits" id="hits"></div><div class="price" id="price"></div></div>
+</section>
+<div class="actions">
+  <button class="full" id="spin">Крутить</button>
+  <button class="alt" id="sell" disabled>Продать</button>
+  <button class="alt" id="keep" disabled>В гараж</button>
+</div>
+<h2><span>Гараж</span><span id="cap"></span></h2>
+<ul class="garage" id="garage"></ul>
+<div class="toast" id="toast"></div>
+<script>
+(function(){"use strict";
+const tg=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData?Telegram.WebApp:null;
+if(tg){try{tg.ready();tg.expand();tg.setHeaderColor("#1b1e22");tg.setBackgroundColor("#1b1e22")}catch(e){}}
+const AUTH=tg?"tma "+tg.initData:"dev 1"; // "dev" работает только если на сервере DEV_MODE=1
+const ERR={no_coins:"Не хватает монет",resolve_pending:"Сначала продайте или сохраните номер",garage_full:"Гараж заполнен",unauthorized:"Откройте игру через Telegram"};
+const $=id=>document.getElementById(id);let S=null,busy=false;
+const toast=t=>{const e=$("toast");e.textContent=t;e.classList.add("on");clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove("on"),1800)};
+async function api(path,method,body){
+  const r=await fetch(path,{method:method||"GET",headers:{"Content-Type":"application/json",Authorization:AUTH},body:body?JSON.stringify(body):undefined});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||("http_"+r.status));return j}
+async function act(path,body){if(busy)return;busy=true;
+  try{const prev=S&&S.coins;S=await api(path,"POST",body);if(path==="/api/sell"||path==="/api/sell-garage")toast("+"+(S.coins-prev));
+    try{tg&&tg.HapticFeedback.notificationOccurred(path==="/api/spin"&&S.pending&&S.pending.rank>=2?"success":"warning")}catch(e){}}
+  catch(e){toast(ERR[e.message]||"Ошибка связи")}busy=false;render()}
+function showPlate(p){const pl=$("plate");pl.classList.toggle("empty",!p);if(!p)return;
+  $("main").textContent=p.text;$("reg").textContent=p.region;
+  const t=$("tier");t.textContent=p.tier+", "+p.total+" очк.";t.style.color="var(--t"+p.rank+")";
+  $("hits").textContent=p.hits.length?p.hits.map(h=>h.name+" +"+h.pts).join(", "):"Комбинаций нет";$("price").textContent="Цена продажи: "+p.price}
+function render(){if(!S)return;const c=S.config,pend=S.pending;
+  $("coins").textContent=S.coins;$("cap").textContent=S.garage.length+" / "+c.garageSize;
+  $("spin").textContent="Крутить за "+c.spinCost;$("spin").disabled=!!pend||S.coins<c.spinCost;
+  $("sell").disabled=!pend;$("keep").disabled=!pend||S.garage.length>=c.garageSize;
+  if(pend)showPlate(pend);
+  const g=$("garage");g.textContent="";
+  if(!S.garage.length){const d=document.createElement("div");d.className="empty-msg";d.textContent="Гараж пуст.";g.appendChild(d)}
+  S.garage.forEach(it=>{const li=document.createElement("li");li.style.borderLeftColor="var(--t"+it.rank+")";
+    const n=document.createElement("div");n.className="num";n.textContent=it.text+" "+it.region;
+    const sm=document.createElement("small");sm.textContent=it.tier+", "+it.total+" очк.";n.appendChild(sm);
+    const b=document.createElement("button");b.className="alt";b.textContent="Продать за "+it.price;b.onclick=()=>act("/api/sell-garage",{id:it.id});
+    li.append(n,b);g.appendChild(li)})}
+$("spin").onclick=()=>act("/api/spin");$("sell").onclick=()=>act("/api/sell");$("keep").onclick=()=>act("/api/keep");
+const u=tg&&tg.initDataUnsafe&&tg.initDataUnsafe.user;$("hello").textContent=u?"Привет, "+u.first_name:"Тестовый режим (вне Telegram)";
+api("/api/state").then(s=>{S=s;render()}).catch(e=>toast(ERR[e.message]||"Не удалось связаться с сервером"));
+})();
+</script>
+</body>
+</html>
